@@ -1,8 +1,8 @@
 # Quickshell Stability - Plano Consolidado e Implementação
 
-**Status**: 🔄 Em Desenvolvimento  
-**Última atualização**: 2026-02-03  
-**Confiabilidade**: ⭐⭐⭐⭐ (Alta - baseado em análise de código e testes)
+**Status**: ✅ Estável  
+**Última atualização**: 2026-02-04  
+**Confiabilidade**: ⭐⭐⭐⭐⭐ (Muito Alta - testado e validado pelo usuário)
 
 ---
 
@@ -10,13 +10,14 @@
 
 Este documento consolida **todas as decisões e implementações** de estabilidade do quickshell-patched. O objetivo é **zero crashes** com performance aceitável.
 
-### Estado Atual (Commit 216d4be)
+### Estado Atual (Commit 216d4be + patches 2026-02-04)
 
 | Componente | Status | Estabilidade | Performance |
 |-----------|--------|--------------|-------------|
 | **Incubação QML** | ✅ Patch ativo (sync) | 🟢 Estável (sem crashes Steam/Thunar) | 🟡 10-20% mais lento em updates dinâmicos |
 | **System Tray** | ❌ Quebrado | 🔴 `items.count: 0` | N/A |
-| **HDMI Disconnect** | 🔴 Crasha | 🔴 use-after-free em `onScreenDestroyed` | N/A |
+| **HDMI Disconnect** | ✅ Resolvido | 🟢 Sem SIGSEGV, sem overlap notifications | 🟢 Normal |
+| **HDMI Hotplug Visibility** | ✅ Workaround QML | 🟢 Barras reaparecem automaticamente | 🟢 Normal |
 | **Multi-monitor** | ✅ Funciona | 🟢 Bars aparecem em tela correta | 🟢 Normal |
 | **File watching** | ⚠️ Workaround | 🟡 Scripts matam shell antes | 🟡 Reinício manual |
 
@@ -532,6 +533,7 @@ busctl --user call org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
 
 | Data | Alteração | Autor |
 |------|-----------|-------|
+| 2026-02-03 | Implementação HDMI hotplug - múltiplas tentativas C++ e QML | Claude |
 | 2026-02-03 | Documento consolidado criado | Claude |
 | 2026-02-02 | Teste HDMI executado, crash persistiu | Usuário |
 | 2026-02-01 | Diagnóstico tray executado, causa identificada | Claude |
@@ -539,28 +541,219 @@ busctl --user call org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
 
 ---
 
+## 🔬 Investigação HDMI Hotplug (2026-02-03/04) - RESOLVIDO ✅
+
+### Problema Original
+
+**Sintoma**: Ao desconectar HDMI, a barra do laptop **some** (não crasha). Ao apertar Super, a barra **reaparece**. Após reconectar HDMI, aparecem **duas notificações de overlap**.
+
+**Descoberta Importante**: Desde ~22:56 não há mais SIGSEGV crashes (coredumps). O problema era de **visibilidade/renderização**, não crash.
+
+### Solução Final (2026-02-04)
+
+#### Parte 1: Workaround QML para Visibilidade ✅
+
+**Arquivo**: `~/.config/quickshell/caelestia/shell.qml`
+
+**Problema**: Após hotplug, as barras perdiam visibilidade. Apertar Super (abrir launcher) restaurava.
+
+**Causa**: O toggle do launcher ativa `HyprlandFocusGrab` e muda `WlrLayershell.keyboardFocus` para `OnDemand`, forçando o Hyprland a re-renderizar as layer surfaces.
+
+**Solução**: Pulsar `launcher = true/false` em **todos** os screens após hotplug:
+
+```qml
+// HDMI hotplug workaround - pulse ALL screens
+Connections {
+    target: Quickshell
+    function onScreensChanged() {
+        const currentCount = Quickshell.screens.length;
+        console.log("[Hotplug] Screens changed: " + root.previousScreenCount + " -> " + currentCount);
+        
+        root.hotplugRetryCount = 0;
+        
+        // Longer delay when adding screens
+        if (currentCount > root.previousScreenCount) {
+            hotplugWorkaround.interval = 1000;
+        } else {
+            hotplugWorkaround.interval = 500;
+        }
+        
+        root.previousScreenCount = currentCount;
+        hotplugWorkaround.restart();
+    }
+}
+
+Timer {
+    id: hotplugWorkaround
+    interval: 500
+    repeat: false
+    onTriggered: {
+        root.hotplugRetryCount++;
+        
+        // Refresh Hyprland state first
+        Hyprland.refreshMonitors();
+        Hyprland.refreshWorkspaces();
+        
+        // Pulse ALL screens, not just active
+        const screenMap = Visibilities.screens;
+        screenMap.forEach((vis, screenName) => {
+            if (vis) {
+                vis.launcher = true;
+            }
+        });
+        
+        hotplugWorkaround2.restart();
+    }
+}
+
+Timer {
+    id: hotplugWorkaround2
+    interval: 150
+    repeat: false
+    onTriggered: {
+        // Turn off launcher on ALL screens
+        const screenMap = Visibilities.screens;
+        screenMap.forEach((vis, screenName) => {
+            if (vis) {
+                vis.launcher = false;
+            }
+        });
+        
+        // For screen additions, do a second pulse
+        if (root.hotplugRetryCount < 2 && Quickshell.screens.length > 1) {
+            hotplugWorkaround.interval = 500;
+            hotplugWorkaround.restart();
+        }
+    }
+}
+```
+
+**Resultado**: ✅ Barras reaparecem automaticamente após hotplug.
+
+#### Parte 2: Desabilitar Kanshi ✅
+
+**Problema**: Notificações "Your monitor layout is set up incorrectly. Monitor overlaps with other monitor(s)." apareciam após reconexão HDMI.
+
+**Causa**: 
+1. HDMI conecta → Hyprland detecta monitor em posição 0,0 (padrão)
+2. Hyprland envia notificação de overlap (ambos monitores em 0,0)
+3. Kanshi aplica profile com posições corretas
+4. Mas notificação já foi enviada
+
+**Solução**: Desabilitar kanshi e deixar Hyprland usar diretamente o `monitors.conf`:
+
+```bash
+# Desabilitar kanshi
+systemctl --user stop kanshi.service
+systemctl --user disable kanshi.service
+
+# Configuração em ~/.config/hypr/monitors.conf (gerado por nwg-displays)
+monitor=eDP-1,2560x1600@240.0,2560x0,1.25
+monitor=HDMI-A-1,2560x1080@60.0,0x0,1.0
+
+# Fallback para monitores desconhecidos em ~/.config/hypr/hyprland.conf
+monitor=,preferred,auto-right,1
+```
+
+**Resultado**: ✅ Sem notificações de overlap. Monitores gerenciados diretamente pelo Hyprland.
+
+### Configuração Final de Monitores
+
+**Sem Kanshi**:
+- Monitores conhecidos: `~/.config/hypr/monitors.conf` (posições fixas)
+- Monitores novos: Usar `nwg-displays` para configurar e adicionar ao monitors.conf
+- Fallback: `monitor=,preferred,auto-right,1` coloca monitores desconhecidos à direita
+
+**Trade-offs**:
+| Aspecto | Com Kanshi | Sem Kanshi |
+|---------|------------|------------|
+| Profiles automáticos | ✅ Sim | ❌ Não |
+| Notificações overlap | ❌ Aparecem | ✅ Não aparecem |
+| Monitores novos | Automático | Via nwg-displays |
+| Complexidade | Maior | Menor |
+
+**Decisão**: Manter **sem kanshi** - setup mais simples, sem problemas de timing.
+
+### Tentativas Anteriores (Histórico)
+
+#### Tentativa 1: Sync Delete em variants.cpp ✅ CONTRIBUIU
+**Arquivo**: `src/core/variants.cpp` linha 133
+**Resultado**: Contribuiu para eliminar SIGSEGV.
+
+#### Tentativa 2: DirectConnection para screen signals ✅ CONTRIBUIU
+**Arquivo**: `src/core/qmlglobal.cpp` linhas 75-80
+**Resultado**: Contribuiu para estabilidade.
+
+#### Tentativa 3: Hyprland.refreshMonitors/Workspaces ❌ INSUFICIENTE
+**Resultado**: Executava mas não restaurava visibilidade.
+
+#### Tentativa 4: Visibilities.bar = true ❌ NÃO FUNCIONOU
+**Resultado**: Não afetou renderização.
+
+#### Tentativa 5: focusmonitor dispatch ❌ NÃO FUNCIONOU
+**Resultado**: Não afetou renderização.
+
+#### Tentativa 6: Quickshell.reload() ❌ NÃO FUNCIONOU
+**Resultado**: Não apropriado para hotplug.
+
+#### Tentativa 7: Launcher pulse em todos screens ✅ FUNCIONOU
+**Resultado**: Restaura visibilidade ao simular efeito do Super key.
+
+---
+
 ## ⏭️ Próximos Passos
 
 ### Imediato
-1. **Implementar HDMI Fix** (`onScreenDestroyed` migration)
-2. **Testar HDMI Fix** (checklist completa)
+1. ~~**Implementar HDMI Fix**~~ ✅ Resolvido com workaround QML + desabilitar kanshi
 
 ### Logo Após
-3. **Implementar Tray Eager Init** (`init.cpp` + CMakeLists.txt)
-4. **Testar Tray** (ícones aparecem, crashes continuam evitados)
+2. **Implementar Tray Eager Init** (`init.cpp` + CMakeLists.txt) - quando necessário
 
 ### Validação Final
-5. **Rodar todos os testes de regressão**
-6. **Documentar resultados** (atualizar este doc com ✅/❌)
-7. **Atualizar `docs/02-arquitetura.md`** com patches finais
+3. ~~**Rodar todos os testes de regressão**~~ ✅ Validado pelo usuário
+4. ~~**Documentar resultados**~~ ✅ Este documento atualizado
+5. **Atualizar `docs/02-arquitetura.md`** no caelestia-arch-setup
 
 ### Futuro (Opcional)
-8. **File watching patch** (se tempo permitir)
-9. **Reportar HDMI fix upstream** (se funcionar)
-10. **Considerar contribuir sync incubation alternativa upstream** (AsynchronousIfNested + fixes)
+6. **File watching patch** (se tempo permitir)
+7. **Contribuir workaround upstream** (se aplicável)
+
+---
+
+## 📦 Arquivos Modificados (Resumo Final)
+
+### C++ (quickshell-patched)
+
+| Arquivo | Modificação | Status |
+|---------|-------------|--------|
+| `src/core/lazyloader.cpp:166` | `QQmlIncubator::Synchronous` | ✅ Ativo |
+| `src/core/boundcomponent.cpp:117` | `QQmlIncubator::Synchronous` | ✅ Ativo |
+| `src/core/variants.cpp:133` | `delete iter->second` (sync delete) | ✅ Ativo |
+| `src/core/qmlglobal.cpp:75-80` | `Qt::DirectConnection` para screen signals | ✅ Ativo |
+
+### QML (caelestia config)
+
+| Arquivo | Modificação | Status |
+|---------|-------------|--------|
+| `~/.config/quickshell/caelestia/shell.qml` | Hotplug workaround (launcher pulse) | ✅ Ativo |
+| `~/.config/quickshell/caelestia/services/Visibilities.qml` | Usar `screen.name` como key do Map | ✅ Ativo |
+
+### Hyprland Config
+
+| Arquivo | Modificação | Status |
+|---------|-------------|--------|
+| `~/.config/hypr/monitors.conf` | Posições fixas para eDP-1 e HDMI-A-1 | ✅ Ativo |
+| `~/.config/hypr/hyprland.conf` | Fallback `monitor=,preferred,auto-right,1` | ✅ Ativo |
+| `~/.config/hypr/hyprland.conf` | Comentadas linhas `monitor` duplicadas com `auto` | ✅ Ativo |
+
+### Systemd
+
+| Serviço | Estado | Motivo |
+|---------|--------|--------|
+| `kanshi.service` | ❌ Desabilitado | Evita notificações de overlap durante hotplug |
 
 ---
 
 **Autor**: Claude (AI Assistant)  
-**Revisão**: Pendente validação com usuário  
-**Confiabilidade**: ⭐⭐⭐⭐ (Alta - baseado em análise de código, testes executados, e documentação Qt)
+**Revisão**: ✅ Validado pelo usuário (2026-02-04)  
+**Confiabilidade**: ⭐⭐⭐⭐⭐ (Muito Alta - testado e funcionando)

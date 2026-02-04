@@ -72,11 +72,12 @@ QuickshellTracked::QuickshellTracked() {
 	auto* guiApp = qobject_cast<QGuiApplication*>(app);
 
 	if (guiApp != nullptr) {
-		// clang-format off
-		QObject::connect(guiApp, &QGuiApplication::primaryScreenChanged, this, &QuickshellTracked::updateScreens);
-		QObject::connect(guiApp, &QGuiApplication::screenAdded, this, &QuickshellTracked::updateScreens);
-		QObject::connect(guiApp, &QGuiApplication::screenRemoved, this, &QuickshellTracked::updateScreens);
-		// clang-format on
+		// Use DirectConnection to ensure updateScreens runs IMMEDIATELY when screen changes,
+		// before any other handlers (like render loop) can access stale screen references.
+		// This prevents use-after-free crashes during QML incubation.
+		QObject::connect(guiApp, &QGuiApplication::primaryScreenChanged, this, &QuickshellTracked::updateScreens, Qt::DirectConnection);
+		QObject::connect(guiApp, &QGuiApplication::screenAdded, this, &QuickshellTracked::updateScreens, Qt::DirectConnection);
+		QObject::connect(guiApp, &QGuiApplication::screenRemoved, this, &QuickshellTracked::updateScreens, Qt::DirectConnection);
 
 		this->updateScreens();
 	}
@@ -102,6 +103,7 @@ QuickshellTracked* QuickshellTracked::instance() {
 void QuickshellTracked::updateScreens() {
 	auto screens = QGuiApplication::screens();
 	auto newScreens = QList<QuickshellScreenInfo*>();
+	auto oldScreensToDelete = QList<QuickshellScreenInfo*>();
 
 	for (auto* newScreen: screens) {
 		for (auto i = 0; i < this->screens.length(); i++) {
@@ -121,12 +123,22 @@ void QuickshellTracked::updateScreens() {
 	next:;
 	}
 
+	// Collect screens to delete
 	for (auto* oldScreen: this->screens) {
-		oldScreen->deleteLater();
+		oldScreensToDelete.append(oldScreen);
 	}
 
+	// Update screens list FIRST
 	this->screens = newScreens;
+	
+	// Emit signal BEFORE deletion so Variants can clean up synchronously
 	emit this->screensChanged();
+	
+	// Now delete old screens synchronously - Variants has already destroyed
+	// its instances, so no QML bindings should reference these anymore
+	for (auto* oldScreen: oldScreensToDelete) {
+		delete oldScreen;
+	}
 }
 
 QuickshellGlobal::QuickshellGlobal(QObject* parent): QObject(parent) {

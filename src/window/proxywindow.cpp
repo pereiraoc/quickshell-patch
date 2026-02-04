@@ -397,7 +397,19 @@ void ProxyWindowBase::setScreen(QuickshellScreenInfo* screen) {
 	}
 }
 
-void ProxyWindowBase::onScreenDestroyed() { this->mScreen = nullptr; }
+void ProxyWindowBase::onScreenDestroyed() {
+	// Fallback handler in case screen is destroyed through other paths
+	// Primary protection is in QuickshellTracked::updateScreens() and Variants::updateVariants()
+	this->mScreen = nullptr;
+	
+	if (this->window != nullptr) {
+		this->window->hide();
+		auto* primaryScreen = QGuiApplication::primaryScreen();
+		if (primaryScreen != nullptr) {
+			this->window->setScreen(primaryScreen);
+		}
+	}
+}
 
 QScreen* ProxyWindowBase::qscreen() const {
 	if (this->window) return this->window->screen();
