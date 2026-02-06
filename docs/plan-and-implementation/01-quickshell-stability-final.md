@@ -21,6 +21,7 @@ Este documento consolida **todas as decisões e implementações** de estabilida
 | **Multi-monitor** | ✅ Funciona | 🟢 Bars aparecem em tela correta | 🟢 Normal |
 | **File watching** | ⚠️ Workaround | 🟡 Scripts matam shell antes | 🟡 Reinício manual |
 | **LogManager recursion** | ✅ Corrigido | 🟢 Guard thread_local impede stack overflow | 🟢 Normal |
+| **WriteBuffer null device** | ✅ Corrigido | 🟢 Null check impede SIGSEGV | 🟢 Normal |
 
 ---
 
@@ -230,10 +231,10 @@ Isso desabilita logging e evita o crash relacionado no `FileViewReader::read`.
 
 ---
 
-#### 7. FileViewReader Crash durante Startup (⚠️ INVESTIGAR)
+#### 7. FileViewReader Crash durante Startup (✅ CORRIGIDO)
 
 **Data**: 2026-02-05  
-**Gatilho**: Iniciar shell com logging habilitado após crashes anteriores.
+**Gatilho**: Iniciar shell com file watcher ativo, quando background thread loga antes do device estar pronto.
 
 **Crash Log**:
 ```
@@ -241,14 +242,40 @@ SIGSEGV in libQt6Core.so
 #0  QIODevice::write(QByteArray const&)
 #1  qs::log::EncodedLogWriter::write
 #2  qs::log::ThreadLogging::onMessage
-#9  qs::io::FileViewReader::read
+...
+#14 caelestia::models::FileSystemModel::updateEntriesForDir
+#15 QtConcurrent::RunFunctionTaskBase
 ```
 
-**Causa Provável**:
-- Log stream não inicializado quando `FileViewReader` tenta ler arquivo
-- QIODevice write chamado em stream inválido
+**Causa Raiz**:
+- `FileSystemModel::updateEntriesForDir` roda em thread de background (QtConcurrent)
+- Chama `QImageReader::supportedImageFormats()` que dispara `qCDebug` via `QFactoryLoader`
+- `ThreadLogging::onMessage` usa `Qt::DirectConnection`, executando na thread chamadora
+- `WriteBuffer::flush()` tentava `device->write()` com `device = nullptr`
+- SIGSEGV em `QIODevice::write`
 
-**Status**: ⚠️ Investigar - workaround com `QT_LOGGING_RULES="*=false"`
+**Arquivo**: `src/core/logging.cpp`
+
+**Solução Implementada**:
+```cpp
+bool WriteBuffer::flush() {
+    if (!this->device) {
+        this->buffer.clear();
+        return false;  // Silently fail if device not ready
+    }
+    auto written = this->device->write(this->buffer);
+    auto success = written == this->buffer.length();
+    this->buffer.clear();
+    return success;
+}
+```
+
+**Justificativa**:
+- Null check defensivo antes de write
+- Limpa buffer mesmo sem device (evita acúmulo de memória)
+- Retorna false para indicar falha sem crash
+
+**Status**: ✅ Implementado em 2026-02-05
 
 ---
 

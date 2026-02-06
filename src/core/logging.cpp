@@ -577,6 +577,10 @@ void WriteBuffer::setDevice(QIODevice* device) { this->device = device; }
 bool WriteBuffer::hasDevice() const { return this->device; }
 
 bool WriteBuffer::flush() {
+	if (!this->device) {
+		this->buffer.clear();
+		return false;
+	}
 	auto written = this->device->write(this->buffer);
 	auto success = written == this->buffer.length();
 	this->buffer.clear();
