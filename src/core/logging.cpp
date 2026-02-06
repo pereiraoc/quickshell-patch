@@ -232,6 +232,13 @@ void LogManager::messageHandler(
 }
 
 void LogManager::filterCategory(QLoggingCategory* category) {
+	// Guard against infinite recursion when lastCategoryFilter points back to filterCategory
+	// This can happen if installFilter is called multiple times (e.g., shell restart)
+	// Bug fix: https://github.com/pereiraoc/quickshell-patched - see docs/plan-and-implementation/
+	static thread_local bool inFilter = false;
+	if (inFilter) return;
+	inFilter = true;
+
 	auto* instance = LogManager::instance();
 
 	auto categoryName = QLatin1StringView(category->categoryName());
@@ -272,6 +279,8 @@ void LogManager::filterCategory(QLoggingCategory* category) {
 	}
 
 	instance->allFilters.insert(categoryName, filter);
+
+	inFilter = false;
 }
 
 LogManager* LogManager::instance() {

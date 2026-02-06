@@ -1,7 +1,7 @@
 # Quickshell Stability - Plano Consolidado e Implementação
 
 **Status**: ✅ Estável  
-**Última atualização**: 2026-02-04  
+**Última atualização**: 2026-02-05  
 **Confiabilidade**: ⭐⭐⭐⭐⭐ (Muito Alta - testado e validado pelo usuário)
 
 ---
@@ -10,7 +10,7 @@
 
 Este documento consolida **todas as decisões e implementações** de estabilidade do quickshell-patched. O objetivo é **zero crashes** com performance aceitável.
 
-### Estado Atual (Commit 216d4be + patches 2026-02-04)
+### Estado Atual (Commit 216d4be + patches 2026-02-05)
 
 | Componente | Status | Estabilidade | Performance |
 |-----------|--------|--------------|-------------|
@@ -20,6 +20,7 @@ Este documento consolida **todas as decisões e implementações** de estabilida
 | **HDMI Hotplug Visibility** | ✅ Workaround QML | 🟢 Barras reaparecem automaticamente | 🟢 Normal |
 | **Multi-monitor** | ✅ Funciona | 🟢 Bars aparecem em tela correta | 🟢 Normal |
 | **File watching** | ⚠️ Workaround | 🟡 Scripts matam shell antes | 🟡 Reinício manual |
+| **LogManager recursion** | ✅ Corrigido | 🟢 Guard thread_local impede stack overflow | 🟢 Normal |
 
 ---
 
@@ -173,6 +174,81 @@ signal 11/SEGV in libQt6Core.so.6.10.1
 **Solução Atual**: Workaround com delay de 50ms entre `closewindow` no script.
 
 **Decisão**: Não implementar patch no quickshell (complexidade vs benefício).
+
+---
+
+#### 6. Stack Overflow em LogManager::filterCategory (✅ CORRIGIDO)
+
+**Data**: 2026-02-05  
+**Gatilho**: Reiniciar shell duas vezes rapidamente, ou matar processos quickshell duplicados.
+
+**Crash Log**:
+```
+SIGSEGV in libQt6Core.so
+#0  QtPrivate::startsWith(QLatin1String, ...)
+#1  qs::log::LogManager::filterCategory(QLoggingCategory*)
+#2  qs::log::LogManager::filterCategory  ← recursão infinita (stack overflow)
+...
+#29 qs::log::LogManager::filterCategory
+```
+
+**Causa Raiz**:
+- `QLoggingCategory::installFilter(&filterCategory)` retorna filtro anterior em `lastCategoryFilter`
+- Se shell reinicia sem morrer completamente, `lastCategoryFilter` pode apontar para a própria `filterCategory`
+- Chamada `instance->lastCategoryFilter(category)` na linha 256 → recursão infinita
+- Stack overflow → SIGSEGV
+
+**Arquivo**: `src/core/logging.cpp`
+
+**Solução Implementada**:
+```cpp
+void LogManager::filterCategory(QLoggingCategory* category) {
+    // Guard against infinite recursion when lastCategoryFilter points back to filterCategory
+    // This can happen if installFilter is called multiple times (e.g., shell restart)
+    static thread_local bool inFilter = false;
+    if (inFilter) return;
+    inFilter = true;
+
+    // ... existing code ...
+
+    inFilter = false;
+}
+```
+
+**Justificativa**:
+- `thread_local` garante guard por thread (evita problemas com multi-threading)
+- Early return seguro: se já estamos filtrando, não precisamos refiltrar
+- Custo zero em uso normal (apenas uma verificação booleana)
+
+**Status**: ✅ Implementado em 2026-02-05
+
+**Workaround Temporário**: Se shell não inicia, usar:
+```bash
+QT_LOGGING_RULES="*=false" quickshell -p /path/to/shell
+```
+Isso desabilita logging e evita o crash relacionado no `FileViewReader::read`.
+
+---
+
+#### 7. FileViewReader Crash durante Startup (⚠️ INVESTIGAR)
+
+**Data**: 2026-02-05  
+**Gatilho**: Iniciar shell com logging habilitado após crashes anteriores.
+
+**Crash Log**:
+```
+SIGSEGV in libQt6Core.so
+#0  QIODevice::write(QByteArray const&)
+#1  qs::log::EncodedLogWriter::write
+#2  qs::log::ThreadLogging::onMessage
+#9  qs::io::FileViewReader::read
+```
+
+**Causa Provável**:
+- Log stream não inicializado quando `FileViewReader` tenta ler arquivo
+- QIODevice write chamado em stream inválido
+
+**Status**: ⚠️ Investigar - workaround com `QT_LOGGING_RULES="*=false"`
 
 ---
 
