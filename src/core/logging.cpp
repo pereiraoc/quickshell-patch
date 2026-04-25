@@ -14,6 +14,7 @@
 #include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
+#include <qmutex.h>
 #include <qnamespace.h>
 #include <qobject.h>
 #include <qobjectdefs.h>
@@ -30,6 +31,9 @@
 #ifdef __linux__
 #include <sys/sendfile.h>
 #include <sys/types.h>
+#endif
+#ifdef __FreeBSD__
+#include <unistd.h>
 #endif
 
 #include "instanceinfo.hpp"
@@ -67,7 +71,7 @@ bool copyFileData(int sourceFd, int destFd, qint64 size) {
 	return true;
 #else
 	std::array<char, 64 * 1024> buffer = {};
-	auto remaining = totalTarget;
+	auto remaining = usize;
 
 	while (remaining > 0) {
 		auto chunk = std::min(remaining, buffer.size());
@@ -217,6 +221,7 @@ void LogManager::messageHandler(
 	}
 
 	if (display) {
+		auto locker = QMutexLocker(&self->stdoutMutex);
 		LogMessage::formatMessage(
 		    self->stdoutStream,
 		    message,
@@ -232,13 +237,6 @@ void LogManager::messageHandler(
 }
 
 void LogManager::filterCategory(QLoggingCategory* category) {
-	// Guard against infinite recursion when lastCategoryFilter points back to filterCategory
-	// This can happen if installFilter is called multiple times (e.g., shell restart)
-	// Bug fix: https://github.com/pereiraoc/quickshell-patched - see docs/plan-and-implementation/
-	static thread_local bool inFilter = false;
-	if (inFilter) return;
-	inFilter = true;
-
 	auto* instance = LogManager::instance();
 
 	auto categoryName = QLatin1StringView(category->categoryName());
@@ -279,8 +277,6 @@ void LogManager::filterCategory(QLoggingCategory* category) {
 	}
 
 	instance->allFilters.insert(categoryName, filter);
-
-	inFilter = false;
 }
 
 LogManager* LogManager::instance() {
@@ -314,9 +310,14 @@ void LogManager::init(
 		instance->rules->append(parser.rules());
 	}
 
-	qInstallMessageHandler(&LogManager::messageHandler);
-
 	instance->lastCategoryFilter = QLoggingCategory::installFilter(&LogManager::filterCategory);
+
+	if (instance->lastCategoryFilter == &LogManager::filterCategory) {
+		qCFatal(logLogging) << "Quickshell's log filter has been installed twice. This is a bug.";
+		instance->lastCategoryFilter = nullptr;
+	}
+
+	qInstallMessageHandler(&LogManager::messageHandler);
 
 	qCDebug(logLogging) << "Creating offthread logger...";
 	auto* thread = new QThread();
@@ -577,10 +578,6 @@ void WriteBuffer::setDevice(QIODevice* device) { this->device = device; }
 bool WriteBuffer::hasDevice() const { return this->device; }
 
 bool WriteBuffer::flush() {
-	if (!this->device) {
-		this->buffer.clear();
-		return false;
-	}
 	auto written = this->device->write(this->buffer);
 	auto success = written == this->buffer.length();
 	this->buffer.clear();

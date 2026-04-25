@@ -111,7 +111,7 @@ void BoundComponent::tryCreate() {
 		}
 	}
 
-	this->incubator = new QsQmlIncubator(QsQmlIncubator::Synchronous, this);
+	this->incubator = new QsQmlIncubator(QsQmlIncubator::AsynchronousIfNested, this);
 	this->incubator->setInitialProperties(initialProperties);
 
 	// clang-format off

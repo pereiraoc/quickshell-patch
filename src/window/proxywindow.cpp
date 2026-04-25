@@ -1,4 +1,5 @@
 #include "proxywindow.hpp"
+#include <functional>
 
 #include <private/qquickwindow_p.h>
 #include <qcontainerfwd.h>
@@ -13,6 +14,7 @@
 #include <qqmlengine.h>
 #include <qqmlinfo.h>
 #include <qqmllist.h>
+#include <qquickgraphicsconfiguration.h>
 #include <qquickitem.h>
 #include <qquickwindow.h>
 #include <qregion.h>
@@ -56,10 +58,17 @@ ProxyWindowBase::ProxyWindowBase(QObject* parent)
 
 ProxyWindowBase::~ProxyWindowBase() { this->deleteWindow(true); }
 
+ProxyWindowBase* ProxyWindowBase::forObject(QObject* obj) {
+	if (auto* proxy = qobject_cast<ProxyWindowBase*>(obj)) return proxy;
+	if (auto* iface = qobject_cast<WindowInterface*>(obj)) return iface->proxyWindow();
+	return nullptr;
+}
+
 void ProxyWindowBase::onReload(QObject* oldInstance) {
-	this->window = this->retrieveWindow(oldInstance);
+	if (this->mVisible) this->window = this->retrieveWindow(oldInstance);
 	auto wasVisible = this->window != nullptr && this->window->isVisible();
-	this->ensureQWindow();
+
+	if (this->mVisible) this->ensureQWindow();
 
 	// The qml engine will leave the WindowInterface as owner of everything
 	// nested in an item, so we have to make sure the interface's children
@@ -76,17 +85,21 @@ void ProxyWindowBase::onReload(QObject* oldInstance) {
 
 	Reloadable::reloadChildrenRecursive(this, oldInstance);
 
-	this->connectWindow();
-	this->completeWindow();
+	if (this->mVisible) {
+		this->connectWindow();
+		this->completeWindow();
+	}
 
 	this->reloadComplete = true;
 
-	emit this->windowConnected();
-	this->postCompleteWindow();
+	if (this->mVisible) {
+		emit this->windowConnected();
+		this->postCompleteWindow();
 
-	if (wasVisible && this->isVisibleDirect()) {
-		emit this->backerVisibilityChanged();
-		this->onExposed();
+		if (wasVisible && this->isVisibleDirect()) {
+			this->bBackerVisibility = true;
+			this->onExposed();
+		}
 	}
 }
 
@@ -142,6 +155,15 @@ void ProxyWindowBase::ensureQWindow() {
 	this->window = nullptr; // createQQuickWindow may indirectly reference this->window
 	this->window = this->createQQuickWindow();
 	this->window->setFormat(format);
+
+	// needed for vulkan dmabuf import, qt ignores these if not applicable
+	auto graphicsConfig = this->window->graphicsConfiguration();
+	graphicsConfig.setDeviceExtensions({
+	    "VK_KHR_external_memory_fd",
+	    "VK_EXT_external_memory_dma_buf",
+	    "VK_EXT_image_drm_format_modifier",
+	});
+	this->window->setGraphicsConfiguration(graphicsConfig);
 }
 
 void ProxyWindowBase::createWindow() {
@@ -208,6 +230,7 @@ void ProxyWindowBase::completeWindow() {
 	this->trySetHeight(this->implicitHeight());
 	this->setColor(this->mColor);
 	this->updateMask();
+	QQuickWindowPrivate::get(this->window)->updatesEnabled = this->mUpdatesEnabled;
 
 	// notify initial / post-connection geometry
 	emit this->xChanged();
@@ -272,24 +295,27 @@ void ProxyWindowBase::setVisible(bool visible) {
 
 void ProxyWindowBase::setVisibleDirect(bool visible) {
 	if (this->deleteOnInvisible()) {
-		if (visible == this->isVisibleDirect()) return;
-
 		if (visible) {
+			if (visible == this->isVisibleDirect()) return;
 			this->createWindow();
 			this->polishItems();
 			this->window->setVisible(true);
-			emit this->backerVisibilityChanged();
+			this->bBackerVisibility = true;
 		} else {
-			if (this->window != nullptr) {
-				this->window->setVisible(false);
-				emit this->backerVisibilityChanged();
-				this->deleteWindow();
-			}
+			if (this->window != nullptr) this->window->setVisible(false);
+			this->bBackerVisibility = false;
+			this->deleteWindow();
 		}
-	} else if (this->window != nullptr) {
-		if (visible) this->polishItems();
-		this->window->setVisible(visible);
-		emit this->backerVisibilityChanged();
+	} else {
+		if (visible && this->window == nullptr) {
+			this->createWindow();
+		}
+
+		if (this->window != nullptr) {
+			if (visible) this->polishItems();
+			this->window->setVisible(visible);
+			this->bBackerVisibility = visible;
+		}
 	}
 }
 
@@ -397,19 +423,7 @@ void ProxyWindowBase::setScreen(QuickshellScreenInfo* screen) {
 	}
 }
 
-void ProxyWindowBase::onScreenDestroyed() {
-	// Fallback handler in case screen is destroyed through other paths
-	// Primary protection is in QuickshellTracked::updateScreens() and Variants::updateVariants()
-	this->mScreen = nullptr;
-	
-	if (this->window != nullptr) {
-		this->window->hide();
-		auto* primaryScreen = QGuiApplication::primaryScreen();
-		if (primaryScreen != nullptr) {
-			this->window->setScreen(primaryScreen);
-		}
-	}
-}
+void ProxyWindowBase::onScreenDestroyed() { this->mScreen = nullptr; }
 
 QScreen* ProxyWindowBase::qscreen() const {
 	if (this->window) return this->window->screen();
@@ -471,6 +485,19 @@ void ProxyWindowBase::setSurfaceFormat(QsSurfaceFormat format) {
 
 	this->qsSurfaceFormat = format;
 	emit this->surfaceFormatChanged();
+}
+
+bool ProxyWindowBase::updatesEnabled() const { return this->mUpdatesEnabled; }
+
+void ProxyWindowBase::setUpdatesEnabled(bool updatesEnabled) {
+	if (updatesEnabled == this->mUpdatesEnabled) return;
+	this->mUpdatesEnabled = updatesEnabled;
+
+	if (this->window != nullptr) {
+		QQuickWindowPrivate::get(this->window)->updatesEnabled = updatesEnabled;
+	}
+
+	emit this->updatesEnabledChanged();
 }
 
 qreal ProxyWindowBase::devicePixelRatio() const {
@@ -583,6 +610,33 @@ void ProxyWindowAttached::setWindow(ProxyWindowBase* window) {
 	auto* parentInterface = window ? qobject_cast<WindowInterface*>(window->parent()) : nullptr;
 	this->mWindowInterface = parentInterface ? static_cast<QObject*>(parentInterface) : window;
 	emit this->windowChanged();
+}
+
+ProxiedWindow::ProxiedWindow(ProxyWindowBase* proxy, QWindow* parent)
+    : QQuickWindow(parent)
+    , mProxy(proxy) {
+	QObject::connect(
+	    this,
+	    &QQuickWindow::sceneGraphInitialized,
+	    this,
+	    &ProxiedWindow::onSceneGraphInitialized
+	);
+}
+
+namespace {
+QList<std::function<void(QQuickWindow*)>> SCENEGRAPH_INIT_CALLBACKS; // NOLINT
+}
+
+void ProxiedWindow::callOnScenegraphInit(std::function<void(QQuickWindow*)> cb) { // NOLINT
+	SCENEGRAPH_INIT_CALLBACKS.emplaceBack(cb);
+}
+
+void ProxiedWindow::onSceneGraphInitialized() {
+	for (auto& cb: SCENEGRAPH_INIT_CALLBACKS) {
+		cb(this);
+	}
+
+	SCENEGRAPH_INIT_CALLBACKS.clear();
 }
 
 bool ProxiedWindow::event(QEvent* event) {

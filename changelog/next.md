@@ -20,26 +20,70 @@ set shell id.
 - Added the ability to handle move and resize events to FloatingWindow.
 - Pipewire service now reconnects if pipewire dies or a protocol error occurs.
 - Added pipewire audio peak detection.
-- Added initial support for network management.
+- Added network management support.
+- Added support for grabbing focus from popup windows.
+- Added support for IPC signal listeners.
+- Added Quickshell version checking and version gated preprocessing.
+- Added a way to detect if an icon is from the system icon theme or not.
+- Added vulkan support to screencopy.
+- Added generic WindowManager interface implementing ext-workspace.
+- Added ext-background-effect window blur support.
+- Added per-corner radius support to Region.
+- Added ColorQuantizer region selection.
+- Added dialog window support to FloatingWindow.
 
 ## Other Changes
 
 - FreeBSD is now partially supported.
 - IPC operations filter available instances to the current display connection by default.
 - PwNodeLinkTracker ignores sound level monitoring programs.
+- Replaced breakpad with cpptrace.
+- Reloads are prevented if no file content has changed.
+- Added `QS_DISABLE_FILE_WATCHER` environment variable to disable file watching.
+- Added `QS_DISABLE_CRASH_HANDLER` environment variable to disable crash handling.
+- Added `QS_CRASHREPORT_URL` environment variable to allow overriding the crash reporter link.
+- Added `AppId` pragma and `QS_APP_ID` environment variable to allow overriding the desktop application ID.
+- Added `DropExpensiveFonts` pragma and `QS_DROP_EXPENSIVE_FONTS` environment variable which avoids loading fonts which may cause lag and excessive memory usage if many variants are used.
+- Added `DefaultEnv` pragma which sets an environment variable if not already set.
+- Unrecognized pragmas are no longer a hard error for future backward compatibility.
 
 ## Bug Fixes
 
 - Fixed volume control breaking with pipewire pro audio mode.
 - Fixed volume control breaking with bluez streams and potentially others.
+- Fixed volume control breaking for devices without route definitions.
 - Fixed escape sequence handling in desktop entries.
 - Fixed volumes not initializing if a pipewire device was already loaded before its node.
 - Fixed hyprland active toplevel not resetting after window closes.
 - Fixed hyprland ipc window names and titles being reversed.
+- Fixed a hyprland ipc crash when refreshing toplevels before workspaces.
 - Fixed missing signals for system tray item title and description updates.
 - Fixed asynchronous loaders not working after reload.
 - Fixed asynchronous loaders not working before window creation.
+- Fixed memory leak in IPC handlers.
+- Fixed ClippingRectangle related crashes.
+- Fixed crashes when monitors are unplugged.
+- Fixed crashes when default pipewire devices are lost.
+- Fixed ToplevelManager not clearing activeToplevel on deactivation.
+- Desktop action order is now preserved.
+- Fixed partial socket reads in greetd and hyprland on slow machines.
+- Worked around Qt bug causing crashes when plugging and unplugging monitors.
+- Fixed HyprlandFocusGrab crashing if windows were destroyed after being passed to it.
+- Fixed ScreencopyView pixelation when scaled.
+- Fixed JsonAdapter crashing and providing bad data on read when using JsonObject.
+- Fixed JsonAdapter sending unnecessary property changes for primitive values.
+- Fixed JsonAdapter serialization for lists.
+- Fixed pipewire crashes after hotplugging devices and changing default outputs.
+- Fixed launches failing for `--daemonize` on some systems.
+- Fixed screencopy crashing when used across GPUs.
+- Fixed pipewire volumes not working for some pw-pulse clients.
+- Fixed nulls in Toplevel.screens after unplugging a monitor.
+- Fixed some DbusMenu updates being dropped from apps.
 
 ## Packaging Changes
 
-`glib` and `polkit` have been added as dependencies when compiling with polkit agent support.
+- `glib` and `polkit` have been added as dependencies when compiling with polkit agent support.
+- `vulkan-headers` has been added as a build-time dependency for screencopy (Vulkan backend support).
+- `breakpad` has been replaced by `cpptrace`, which is far easier to package, and the `CRASH_REPORTER` cmake variable has been replaced with `CRASH_HANDLER` to stop this from being easy to ignore.
+- `DISTRIBUTOR_DEBUGINFO_AVAILABLE` was removed as it is no longer important without breakpad.
+- `libdrm` is now unconditionally required as a direct dependency.

@@ -1,11 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
 project(quickshell VERSION "0.2.1" LANGUAGES CXX C)
 
+set(UNRELEASED_FEATURES
+	"network.2"
+	"colorquant-imagerect"
+	"window-parent"
+)
+
 set(QT_MIN_VERSION "6.6.0")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(QS_BUILD_OPTIONS "")
+
+# should be changed for forks
+set(CRASHREPORT_URL "https://github.com/outfoxxed/quickshell/issues/new?template=crash2.yml" CACHE STRING "Bugreport URL")
 
 function(boption VAR NAME DEFAULT)
 	cmake_parse_arguments(PARSE_ARGV 3 arg "" "REQUIRES" "")
@@ -38,19 +47,17 @@ string(APPEND QS_BUILD_OPTIONS "  Distributor: ${DISTRIBUTOR}")
 
 message(STATUS "Quickshell configuration")
 message(STATUS "  Distributor: ${DISTRIBUTOR}")
-boption(DISTRIBUTOR_DEBUGINFO_AVAILABLE "Distributor provided debuginfo" NO)
 boption(NO_PCH "Disable precompild headers (dev)" OFF)
 boption(BUILD_TESTING "Build tests (dev)" OFF)
 boption(ASAN "ASAN (dev)" OFF) # note: better output with gcc than clang
 boption(FRAME_POINTERS "Keep Frame Pointers (dev)" ${ASAN})
 
 if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
-	boption(CRASH_REPORTER "Crash Handling" OFF)
 	boption(USE_JEMALLOC "Use jemalloc" OFF)
 else()
-	boption(CRASH_REPORTER "Crash Handling" ON)
 	boption(USE_JEMALLOC "Use jemalloc" ON)
 endif()
+boption(CRASH_HANDLER "Crash Handling" ON)
 boption(SOCKETS "Unix Sockets" ON)
 boption(WAYLAND "Wayland" ON)
 boption(WAYLAND_WLR_LAYERSHELL "  Wlroots Layer-Shell" ON REQUIRES WAYLAND)
@@ -84,8 +91,9 @@ include(cmake/util.cmake)
 
 add_compile_options(-Wall -Wextra -Wno-vla-cxx-extension)
 
-# pipewire defines this, breaking PCH
+# pipewire defines these, breaking PCH
 add_compile_definitions(_REENTRANT)
+add_compile_options(-fno-strict-overflow)
 
 if (FRAME_POINTERS)
 	add_compile_options(-fno-omit-frame-pointer)

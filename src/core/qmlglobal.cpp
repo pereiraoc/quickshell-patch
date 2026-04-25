@@ -26,9 +26,11 @@
 #include "../io/processcore.hpp"
 #include "generation.hpp"
 #include "iconimageprovider.hpp"
+#include "instanceinfo.hpp"
 #include "paths.hpp"
 #include "qmlscreen.hpp"
 #include "rootwrapper.hpp"
+#include "scanenv.hpp"
 
 QuickshellSettings::QuickshellSettings() {
 	QObject::connect(
@@ -59,7 +61,9 @@ void QuickshellSettings::setWorkingDirectory(QString workingDirectory) { // NOLI
 	emit this->workingDirectoryChanged();
 }
 
-bool QuickshellSettings::watchFiles() const { return this->mWatchFiles; }
+bool QuickshellSettings::watchFiles() const {
+	return this->mWatchFiles && qEnvironmentVariableIsEmpty("QS_DISABLE_FILE_WATCHER");
+}
 
 void QuickshellSettings::setWatchFiles(bool watchFiles) {
 	if (watchFiles == this->mWatchFiles) return;
@@ -72,12 +76,11 @@ QuickshellTracked::QuickshellTracked() {
 	auto* guiApp = qobject_cast<QGuiApplication*>(app);
 
 	if (guiApp != nullptr) {
-		// Use DirectConnection to ensure updateScreens runs IMMEDIATELY when screen changes,
-		// before any other handlers (like render loop) can access stale screen references.
-		// This prevents use-after-free crashes during QML incubation.
-		QObject::connect(guiApp, &QGuiApplication::primaryScreenChanged, this, &QuickshellTracked::updateScreens, Qt::DirectConnection);
-		QObject::connect(guiApp, &QGuiApplication::screenAdded, this, &QuickshellTracked::updateScreens, Qt::DirectConnection);
-		QObject::connect(guiApp, &QGuiApplication::screenRemoved, this, &QuickshellTracked::updateScreens, Qt::DirectConnection);
+		// clang-format off
+		QObject::connect(guiApp, &QGuiApplication::primaryScreenChanged, this, &QuickshellTracked::updateScreens);
+		QObject::connect(guiApp, &QGuiApplication::screenAdded, this, &QuickshellTracked::updateScreens);
+		QObject::connect(guiApp, &QGuiApplication::screenRemoved, this, &QuickshellTracked::updateScreens);
+		// clang-format on
 
 		this->updateScreens();
 	}
@@ -103,7 +106,6 @@ QuickshellTracked* QuickshellTracked::instance() {
 void QuickshellTracked::updateScreens() {
 	auto screens = QGuiApplication::screens();
 	auto newScreens = QList<QuickshellScreenInfo*>();
-	auto oldScreensToDelete = QList<QuickshellScreenInfo*>();
 
 	for (auto* newScreen: screens) {
 		for (auto i = 0; i < this->screens.length(); i++) {
@@ -123,22 +125,12 @@ void QuickshellTracked::updateScreens() {
 	next:;
 	}
 
-	// Collect screens to delete
 	for (auto* oldScreen: this->screens) {
-		oldScreensToDelete.append(oldScreen);
+		oldScreen->deleteLater();
 	}
 
-	// Update screens list FIRST
 	this->screens = newScreens;
-	
-	// Emit signal BEFORE deletion so Variants can clean up synchronously
 	emit this->screensChanged();
-	
-	// Now delete old screens synchronously - Variants has already destroyed
-	// its instances, so no QML bindings should reference these anymore
-	for (auto* oldScreen: oldScreensToDelete) {
-		delete oldScreen;
-	}
 }
 
 QuickshellGlobal::QuickshellGlobal(QObject* parent): QObject(parent) {
@@ -160,6 +152,22 @@ QuickshellGlobal::QuickshellGlobal(QObject* parent): QObject(parent) {
 
 qint32 QuickshellGlobal::processId() const { // NOLINT
 	return getpid();
+}
+
+QString QuickshellGlobal::instanceId() const { // NOLINT
+	return InstanceInfo::CURRENT.instanceId;
+}
+
+QString QuickshellGlobal::shellId() const { // NOLINT
+	return InstanceInfo::CURRENT.shellId;
+}
+
+QString QuickshellGlobal::appId() const { // NOLINT
+	return InstanceInfo::CURRENT.appId;
+}
+
+QDateTime QuickshellGlobal::launchTime() const { // NOLINT
+	return InstanceInfo::CURRENT.launchTime;
 }
 
 qsizetype QuickshellGlobal::screensCount(QQmlListProperty<QuickshellScreenInfo>* /*unused*/) {
@@ -323,6 +331,16 @@ QString QuickshellGlobal::iconPath(const QString& icon, bool check) {
 
 QString QuickshellGlobal::iconPath(const QString& icon, const QString& fallback) {
 	return IconImageProvider::requestString(icon, "", fallback);
+}
+
+bool QuickshellGlobal::hasThemeIcon(const QString& icon) { return QIcon::hasThemeIcon(icon); }
+
+bool QuickshellGlobal::hasVersion(qint32 major, qint32 minor, const QStringList& features) {
+	return qs::scan::env::PreprocEnv::hasVersion(major, minor, features);
+}
+
+bool QuickshellGlobal::hasVersion(qint32 major, qint32 minor) {
+	return QuickshellGlobal::hasVersion(major, minor, QStringList());
 }
 
 QuickshellGlobal* QuickshellGlobal::create(QQmlEngine* engine, QJSEngine* /*unused*/) {

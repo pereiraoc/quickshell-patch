@@ -123,14 +123,12 @@ void Variants::updateVariants() {
 		return;
 	}
 
-	// clean up removed entries - use synchronous delete to prevent use-after-free
-	// when screen is disconnected. deleteLater() causes race conditions where QML
-	// bindings can still access the object during event loop processing.
+	// clean up removed entries
 	for (auto iter = this->mInstances.values.begin(); iter < this->mInstances.values.end();) {
 		if (this->mModel.contains(iter->first)) {
 			iter++;
 		} else {
-			delete iter->second;
+			iter->second->deleteLater();
 			iter = this->mInstances.values.erase(iter);
 		}
 	}

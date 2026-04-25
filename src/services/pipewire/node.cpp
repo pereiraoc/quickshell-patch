@@ -90,8 +90,6 @@ QString PwAudioChannel::toString(Enum value) {
 
 QString PwNodeType::toString(PwNodeType::Flags type) {
 	switch (type) {
-	// qstringliteral apparently not imported...
-	// NOLINTBEGIN
 	case PwNodeType::VideoSource: return QStringLiteral("VideoSource");
 	case PwNodeType::VideoSink: return QStringLiteral("VideoSink");
 	case PwNodeType::AudioSource: return QStringLiteral("AudioSource");
@@ -101,7 +99,6 @@ QString PwNodeType::toString(PwNodeType::Flags type) {
 	case PwNodeType::AudioInStream: return QStringLiteral("AudioInStream");
 	case PwNodeType::Untracked: return QStringLiteral("Untracked");
 	default: return QStringLiteral("Invalid");
-	// NOLINTEND
 	}
 }
 
@@ -432,6 +429,10 @@ void PwNodeBoundAudio::setMuted(bool muted) {
 }
 
 float PwNodeBoundAudio::averageVolume() const {
+	if (this->mVolumes.isEmpty()) {
+		return 0.0f;
+	}
+
 	float total = 0;
 
 	for (auto volume: this->mVolumes) {
@@ -575,22 +576,67 @@ PwVolumeProps PwVolumeProps::parseSpaPod(const spa_pod* param) {
 	const auto* muteProp = spa_pod_find_prop(param, nullptr, SPA_PROP_mute);
 	const auto* volumeStepProp = spa_pod_find_prop(param, nullptr, SPA_PROP_volumeStep);
 
-	const auto* volumes = reinterpret_cast<const spa_pod_array*>(&volumesProp->value);
-	const auto* channels = reinterpret_cast<const spa_pod_array*>(&channelsProp->value);
-
-	spa_pod* iter = nullptr;
-	SPA_POD_ARRAY_FOREACH(volumes, iter) {
-		// Cubing behavior found in MPD source, and appears to corrospond to everyone else's measurements correctly.
-		auto linear = *reinterpret_cast<float*>(iter);
-		auto visual = std::cbrt(linear);
-		props.volumes.push_back(visual);
+	if (volumesProp) {
+		const auto* volumes = reinterpret_cast<const spa_pod_array*>(&volumesProp->value);
+		spa_pod* iter = nullptr;
+		SPA_POD_ARRAY_FOREACH(volumes, iter) {
+			// Cubing behavior found in MPD source, and appears to corrospond to everyone else's measurements correctly.
+			auto linear = *reinterpret_cast<float*>(iter);
+			auto visual = std::cbrt(linear);
+			props.volumes.push_back(visual);
+		}
 	}
 
-	SPA_POD_ARRAY_FOREACH(channels, iter) {
-		props.channels.push_back(*reinterpret_cast<PwAudioChannel::Enum*>(iter));
+	if (channelsProp) {
+		const auto* channels = reinterpret_cast<const spa_pod_array*>(&channelsProp->value);
+		spa_pod* iter = nullptr;
+		SPA_POD_ARRAY_FOREACH(channels, iter) {
+			props.channels.push_back(*reinterpret_cast<PwAudioChannel::Enum*>(iter));
+		}
 	}
 
-	spa_pod_get_bool(&muteProp->value, &props.mute);
+	if (props.channels.isEmpty()) {
+		// See spa/param/audio/layout.h and pw utils.
+		using C = PwAudioChannel;
+		// clang-format off
+		switch (props.volumes.length()) {
+		case 1: props.channels = {C::Mono}; break;
+		case 2: props.channels = {C::FrontLeft, C::FrontRight}; break;
+		case 3: props.channels = {C::FrontLeft, C::FrontRight, C::LowFrequencyEffects}; break;
+		case 4: props.channels = {C::FrontLeft, C::FrontRight, C::RearLeft, C::RearRight}; break;
+		case 5:
+			props.channels = {C::FrontLeft, C::FrontRight, C::FrontCenter, C::SideLeft, C::SideRight};
+			break;
+		case 6:
+			props.channels = {
+					C::FrontLeft, C::FrontRight, C::FrontCenter,
+					C::LowFrequencyEffects,
+					C::SideLeft, C::SideRight
+			};
+			break;
+		case 7:
+			props.channels = {
+					C::FrontLeft, C::FrontRight, C::FrontCenter,
+					C::RearLeft, C::RearRight,
+					C::SideLeft, C::SideRight
+			};
+			break;
+		case 8:
+			props.channels = {
+					C::FrontLeft, C::FrontRight, C::FrontCenter,
+					C::LowFrequencyEffects,
+					C::RearLeft, C::RearRight,
+					C::SideLeft, C::SideRight
+			};
+			break;
+		default: break;
+		}
+		// clang-format on
+	}
+
+	if (muteProp) {
+		spa_pod_get_bool(&muteProp->value, &props.mute);
+	}
 
 	if (volumeStepProp) {
 		spa_pod_get_float(&volumeStepProp->value, &props.volumeStep);

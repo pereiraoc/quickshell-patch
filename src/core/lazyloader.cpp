@@ -163,7 +163,7 @@ void LazyLoader::incubateIfReady(bool overrideReloadCheck) {
 	}
 
 	this->incubator = new QsQmlIncubator(
-	    QQmlIncubator::Synchronous,
+	    this->targetActive ? QQmlIncubator::Synchronous : QQmlIncubator::Asynchronous,
 	    this
 	);
 
